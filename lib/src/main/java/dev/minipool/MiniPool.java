@@ -1,30 +1,77 @@
 package dev.minipool;
 
 import javax.sql.DataSource;
+import javax.sql.PooledConnection;
+
 import java.io.PrintWriter;
 import java.sql.Connection;
+import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
+import java.sql.SQLTimeoutException;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.logging.Logger;
+import java.time.Duration;
 
 public final class MiniPool implements DataSource, AutoCloseable {
+
     private final PoolConfig config;
-    
-    public MiniPool(PoolConfig config) {
+    private final Deque<Connection> free;
+    private boolean closed = false;
+
+    public MiniPool(PoolConfig config) throws SQLException {
         this.config = config;
+        this.free = new ArrayDeque<>(config.size());
+        for (int i = 0; i < config.size(); i++) {
+            free.addLast(DriverManager.getConnection(
+                    config.jdbcUrl(), config.user(), config.password()));
+        }
     }
 
     @Override
-    public Connection getConnection() throws SQLException {
-        throw new UnsupportedOperationException("step 3");
+    public synchronized Connection getConnection() throws SQLException {
+        if (closed) throw new SQLException("pool is closed");
+        long deadline = config.borrowTimeout().toNanos() + System.nanoTime();
+        while (free.isEmpty()) {
+            long remainingMillis = (deadline - System.nanoTime()) / 1_000_000;
+            if (remainingMillis <= 0) {
+                throw new SQLTimeoutException("timed out");
+            }
+            try {
+                wait(remainingMillis);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();;
+                throw new SQLException("interrupted while waiting for connection");
+            }
+            if (closed) throw new SQLException("pool is closed");
+        }
+        Connection real = free.removeFirst();
+        return PooledConnectionHandler.wrap(real, this);
+    }
+
+    /** Called by the proxy's close() to return a connection to the pool. */
+    synchronized void returnToPool(Connection real) {
+        if (closed) {
+            try { real.close(); } catch (SQLException ignored) {}
+            return;
+        }
+        free.addLast(real);
+        notify(); // wake one waiter in getConnection()
     }
 
     @Override
-    public void close() {
-        throw new UnsupportedOperationException("step 3");
+    public synchronized void close() {
+        if (closed) return;
+        closed = true;
+        for (Connection c : free) {
+            try { c.close(); } catch (SQLException ignored) {}
+        }
+        free.clear();
+        notifyAll(); // any waiters wake, see closed, throw cleanly
     }
 
-    // DataSource methods we deliberately don't implement, every JDBC pool stubs most of these and we do the same
+    // --- DataSource stubs (unchanged) -------------------------------------
     @Override public Connection getConnection(String u, String p) throws SQLException {
         throw new SQLFeatureNotSupportedException("use getConnection()");
     }
