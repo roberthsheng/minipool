@@ -9,12 +9,16 @@ public record PoolConfig(
         int size,
         Duration borrowTimeout
 ) {
-    public static PoolConfig forH2InMemory(int size) {
+    public static PoolConfig forH2InMemory(int size, Duration borrowTimeout) {
         return new PoolConfig(
                 "jdbc:h2:mem:minipool;DB_CLOSE_DELAY=-1",
                 "sa",
                 "",
                 size,
-                Duration.ofSeconds(1));
+                borrowTimeout);
+    }
+
+    public static PoolConfig forH2InMemory(int size) {
+        return forH2InMemory(size, Duration.ofSeconds(1));
     }
 }
